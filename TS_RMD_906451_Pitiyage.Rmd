@@ -1,0 +1,1551 @@
+---
+title: ""
+author: ""
+date: ""
+output: 
+  html_document:
+    code_folding: hide
+---
+
+# **Time Series Analysis and Forecasting**
+
+**Induni Sandapiumi Nawarathna Pitiyage - 906451**
+
+**University of Milan Bicocca, CdLM Data Science**
+
+**A.Y. 2023/2024**
+
+
+```{r message=FALSE, warning=FALSE}
+library(readr)
+library(dplyr)
+library(zoo) # Imputation
+library(ggplot2)
+library(forecast)
+library(tseries)
+library(tsibble)
+library(tibble)
+library(stats)
+library(TSstudio)
+library(plotly)
+library(patchwork)
+library(timeDate)
+library(lubridate)
+library(xts)
+library(KFAS)
+library(randomForest)
+library(caret)
+library(timetk)
+library(tsfknn)
+library(caret)
+library(xgboost)
+library(kableExtra)
+
+```
+
+This project aims to apply linear and machine learning models to the given time series to compare their predictive performance and to provide a forecast for all days from 2015-04-01 to 2015-11-07. The models that have been incorporated in this project are: ARIMA, UCM and machine learning models.
+
+The provided dataset for the analysis contains total 3009 entries with 3 columns. The data have been recorded from 2007-01-04 to 2015-03-31 along with the day of the week in textual format and the final column named as, ‘avg_days’ which represent as a floating-point number on the average number of days needed to close the requests that were closed that day.  
+
+```{r message=FALSE}
+data <- read_csv("C:/Users/1999i/Downloads/train_2324.csv")
+head(data)
+
+```
+
+## **Data Pre-processing** 
+
+**Handling Missing Values**
+
+```{r}
+# Replace blank cells with NA on all columns
+data[data == ''] <- NA
+# Total missing data in the dataset
+blank = sum(is.na(data))
+cat("Total Na values in the original dataset:",blank,"\n")
+
+# Missing data per column
+na_counts <- colSums(is.na(data))
+cat("Total number of NA per column: ","\n")
+na_counts
+
+na_count <- data %>%
+  group_by(weekday) %>%
+  summarize(na_count = sum(is.na(ave_days)))
+na_count
+
+```
+
+The provided dataset is composed with missing values only for ‘avg_days’ attribute. The total number of missing entries for ‘avg_days’ attribute is 202 and among these missing entries majority of the missing values are observed on Sundays. Since the number of missing values are comparatively low with respect to the original data, forward fill imputation (is also known as Last Observation Carried Forward or LOCF) technique is used to handle missing data in time series. 
+
+**Forward Fill (Last Observation Carried Forward) Imputation**
+
+
+```{r}
+# 2. Forward fill
+data$AVG_DAYS <- na.locf(data$ave_days, na.rm = FALSE)
+head(data)
+
+```
+
+The figure below shows the original time series from 2007-01-04 to 2015-03-31 with forward fill imputation.
+
+```{r message=FALSE, warning=FALSE}
+
+ggplot(data, aes(x = date, y = AVG_DAYS)) +
+  geom_line(color = "steelblue", size = 0.4) +
+  labs( x = "Time", y = "Average Days") 
+
+```
+
+
+
+
+**1. Identify Unusual Observations / Understand Patterns**  
+ 
+ * Trimming the dataset
+ * Outlier Detection
+ * Decompose the time series to see the trend, seasonal components
+  
+In order to focus on the most relavant and stable periods and improve model performance, time series is trimmed. Early transition period does not reflect with the latter part of the time series, therefore the time series is trimmed from 2007-01-04 to 2008-12-31. The given dataset is divided in to train and test dataset, where train dataset include the records from 2009-01-01 to 2014-03-31 while test set include records from 2014-04-01 through 2015-03-31.
+
+
+```{r}
+data$date <- as.Date(data$date, format = "%Y-%m-%d")
+
+# trim the dataset
+start_date <- as.Date("2009-01-01")
+end_date <- as.Date("2015-03-31")
+data_filtered <- subset(data, date >= start_date & date <= end_date)
+
+# Convert the filtered dataset into a zoo object (time series)
+ts_data <- zoo(data_filtered$AVG_DAYS, order.by = data_filtered$date)
+
+# Convert zoo object to xts object
+xts_data <- as.xts(ts_data)
+
+#head(ts_data)
+
+end_train_date <- as.Date("2014-03-31")
+start_test_date <- as.Date("2014-04-01")
+ts_train <- window(xts_data,start=start_date ,end=end_train_date)
+ts_test  <- window(xts_data,start=start_test_date)
+
+
+```
+
+
+**Original Dataset with train/test split**
+
+
+```{r}
+#df <- fortify(xts_data)
+# converting xts ts objects to dataframe
+ts_train_df <- fortify(ts_train)
+ts_test_df <- fortify(ts_test)
+# Dataframes (train-test)
+ts_train_df_ <- ts_train_df %>% rename (Date = "Index", Value ="ts_train" )%>% mutate(Dataset = "Training")
+ts_test_df_ <- ts_test_df %>% rename (Date = "Index", Value ="ts_test" )%>% mutate(Dataset = "Testing")
+
+# Combine the data frames
+combined_df <- bind_rows(ts_train_df_, ts_test_df_)
+
+# Plot 
+ggplot(combined_df, aes(x = Date, y = Value, color = Dataset)) +
+  geom_line(size = 0.5) +
+  labs( x = "Time", y = "Value")  +
+  scale_color_manual(name = "Data",values = c("Training" = "steelblue", "Testing" = "orange"))
+
+```
+
+
+**Handling Outliers**
+
+As shown in the figure above, both training and test data are composed with outliers. To identify the outliers exists in both datasets, the 95th percentile is calculated. The values exceeding the threshold is considered as outliers and these outliers are replaced using the Last Observation Carried Forward (LOFC) technique. Figure below shows the outlier correction trimmed time series.
+
+```{r}
+# Handling Outliers
+# Train Datset
+# Calculate the 95th percentile
+percentile_95 <- quantile(ts_train, 0.95)
+outliers <- which(ts_train > percentile_95)
+# Replace outliers with NA
+ts_train[(outliers)] <- NA
+
+# Apply forward fill using na.locf() from zoo
+ts_train <- na.locf(ts_train, na.rm = FALSE)
+
+# test data
+percentile_95 <- quantile(ts_test, 0.95)
+outlier <- which(ts_test > percentile_95)
+ts_test[(outlier)] <- NA
+ts_test <- na.locf(ts_test, na.rm = FALSE)
+
+# Converting to data frame
+
+ts_train_ <- fortify(ts_train)
+ts_test_ <- fortify(ts_test)
+# Dataframes (train-test)
+ts_train_df <- ts_train_ %>% rename (Date = "Index", Value ="ts_train" )%>% mutate(Dataset = "Training")
+ts_test_df <- ts_test_ %>% rename (Date = "Index", Value ="ts_test" )%>% mutate(Dataset = "Testing")
+# Combine the data frames
+combined_df_new <- bind_rows(ts_train_df, ts_test_df)
+
+# Plot 
+ggplot(combined_df_new, aes(x = Date, y = Value, color = Dataset)) +
+  geom_line(size = 0.5) +
+  labs( x = "Time", y = "Value")  +
+  scale_color_manual(name = "Data",values = c("Training" = "steelblue", "Testing" = "orange"))
+
+
+```
+
+**Exploratary Analysis**
+
+To understand the underlying structure and the behaviour of the time series data exploratory data analysis is conducted for training dataset. Figure beolw shows the decomposition of the time series.
+
+```{r}
+data_ts <- ts(coredata(ts_train), start = c(year(start(ts_train)), month(start(ts_train))), frequency = 365)
+decomposed_ts <- decompose(data_ts)
+ts_decompose(data_ts)
+
+```
+
+As shown in the figure above, the observed time series shows the original time series data which composed with trend, seasonal and random(noise) components. The trend component in the time series shows non-monotonic trend as at the beginning of the time series shows a downward trend followed by an upward trend starting from the year 2010 till year 2011 and then time series experienced a decline after year 2011. The seasonal component in the time series captures periodic pattern that occur in regular time intervals. The random(noise) component shows a small noise.
+
+## **ARIMA Models**
+
+After identifying unusual observations and understanding patterns exists in the time series data, it is necessary to observe the variance that exists in time series data. When modelling ARIMA, it is crucial to understand the underlying time series is stationary, meaning constant mean and variance.  Following figure below, along with the figure 6 shows the rolling mean and rolling variance with a window size of 30.
+
+```{r}
+# Calculate rolling mean and standard deviation
+ts_train_df$roll_mean <- rollapply(ts_train_df$Value, width = 30, FUN = mean, align = "right", fill = NA)
+ts_train_df$roll_sd <- rollapply(ts_train_df$Value, width = 30, FUN = sd, align = "right", fill = NA)
+
+
+fig <- plot_ly(ts_train_df, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Original Series',  line = list(color = 'steelblue'))
+fig <- fig %>% add_trace(y = ~roll_mean,  name = 'Rolling mean', line = list(color = 'darkred'))
+fig <- fig %>% add_trace(y = ~roll_sd,  name = 'Rolling std.deviation', line = list(color = 'darkorange'))
+fig
+
+
+```
+
+**Rolling Varience plot**
+
+```{r warning=FALSE}
+
+ts_train_df$Rolling_Varience <- rollapply(ts_train_df$Value, width = 30, FUN = var, align = "right", fill = NA)
+
+
+fig <- plot_ly(ts_train_df, x = ~Date, y = ~Rolling_Varience, type = 'scatter', mode = 'lines', name = 'Rolling varience',
+               line = list(color = 'tomato'))
+fig
+
+```
+
+**Scatter plot of Rolling mean vs rolling variance**
+
+As shown in the figure below, variability and the mean of the time series shows a upward trend over time, suggesting that the mean and variability is not constant and it is changing over time. Therefore, to stabilize the variance, Box-Cox transformation is used.  This transformation is parameterized by $λ$, and it is adjusted to find the best transformation for stabilizing the variance. 
+
+
+```{r message=FALSE, warning=FALSE}
+
+ggplot(ts_train_df, aes(x = roll_mean, y = Rolling_Varience)) + 
+  geom_point( colour = "steelblue") +
+ labs(x = "Mean", y = "Varience") +
+  theme_minimal() 
+
+```
+
+
+**Box-Cox Transformation**
+
+
+
+```{r}
+# Box-Cox Transformation
+ts_train_adj <- ts_train + 1
+lambda <- BoxCox.lambda(ts_train_adj)
+lambda
+ts_train_boxcox <- BoxCox(ts_train_adj, lambda)
+
+# Converting to data frame
+box_train_df <- fortify(ts_train_boxcox)
+box_train_df <- box_train_df %>% rename(Date = "Index",Value ="ts_train_boxcox")
+# Plot 
+ggplot(box_train_df, aes(x = Date, y = Value)) +
+  geom_line(size = 0.5, color = "steelblue") +
+  labs( x = "Date", y = "Value",title = "Box-Cox transformation") #+
+ 
+```
+
+Before applying Box-Cox transformation, a constant term is added to time series data to ensure that the series has no 0 or negative terms and to make it suitable for the Box-Cox transformation. Figure 7 shows the time series after applying the Box-Cox transformation and the plot of rolling mean vs rolling variance of the Box-Cox transformed time series. The optimal value for the best transformation (λ) is 0.409 that is used for stabilizing the variance. The scatter plot in figure below shows no obvious relationship, it suggests that the variance of the series is relatively constant indicating homoscedasticity. 
+
+```{r warning=FALSE, message=FALSE}
+# Calculate rolling mean and standard deviation
+box_train_df$roll_mean <- rollapply(box_train_df$Value, width = 30, FUN = mean, align = "right", fill = NA)
+box_train_df$roll_var <- rollapply(box_train_df$Value, width = 30, FUN = var, align = "right", fill = NA)
+
+ggplot(box_train_df, aes(x = roll_mean, y = roll_var)) + 
+  geom_point( colour = "steelblue") +
+ labs(x = "Mean", y = "Varience") +
+  theme_minimal() 
+
+
+```
+
+**ACF and PACF plots**
+
+To further understand about the repeating patterns, trends within the data such as the seasonality and to check stationarity of the time series data that obtained after the application of Box-Cox transformation, ACF (Auto-correlation function) and PACF (Partial Auto-correlation function) plots have been incorporated.
+
+```{r}
+# Create the ACF and PACF plots
+acf_plot <- ggAcf(ts_train_boxcox) + theme_minimal() + ggtitle("Autocorrelation")
+pacf_plot <- ggPacf(ts_train_boxcox) + theme_minimal() + ggtitle("Partial Autocorrelation")
+
+acf_plot / pacf_plot
+
+```
+
+From the figure above, it is evident that the time series is not stationary as it persists with higher lags and shows significant spikes at regular lags 7, 14, 21 and 28 suggesting that the seasonality is present weekly in the data. Therefore, to remove the seasonality from the time series data, seasonal differencing is performed with a lag 7. 
+
+**Differencing**
+
+```{r warning=FALSE, message=FALSE}
+diff_box_train_data = diff(ts_train_boxcox, 7) 
+
+# Converting to data frame
+diff_box_train_df <- fortify(diff_box_train_data)
+diff_box_train_df <-diff_box_train_df %>% rename(Date = "Index",Value ="diff_box_train_data")
+# Plot 
+ggplot(diff_box_train_df, aes(x = Date, y = Value)) +
+  geom_line(size = 0.5, color = "steelblue") +
+  labs( x = "Date", y = "Value",title = "Differeced time series")
+
+# Create the ACF and PACF plots
+acf_plot <- ggAcf(diff_box_train_data) + theme_minimal() + ggtitle("Autocorrelation")
+pacf_plot <- ggPacf(diff_box_train_data) + theme_minimal() + ggtitle("Partial Autocorrelation")
+
+acf_plot / pacf_plot
+```
+
+Figure above shows the ACF (Auto-correlation Function) plot has a rapid decay autocorrelation suggesting the time series is stationary. Furthermore, these plots have been incorporated to identify the most suitable ARIMA model for the time series. 
+
+To analyse non-seasonal part of the ARIMA model (p and q parameters), the first 7 lags in ACF and PACF have been observed. According to PACF plot the number of significant lags for p are equal to 1 while according to ACF plot number of significant lags for q are equal to 4. To analyse the seasonal part of the ARIMA model (P and Q parameters), the lags at 7,14, 21…. in ACF and PACF have been observed. The number of significant lags for P is 0 and for Q is 3. Since we did not difference non-seasonal part of the ARIMA model, d is equal to 0 while for seasonal part of the ARIMA model D is equal to 1. The final ARIMA model deduce from the ACF/PACF plot is ARIMA $(1,0,4)(0,1,3)_7$.  The table 1, shows the comparison MAE of training and test set of different ARIMA models.
+
+
+```{r}
+# D=1,d=0
+# P=0 ,Q=1 , you should analyze the ACF and PACF at the lags 7,14,21,… . You should notice a kind of decreasing PACF and ACF (LAG 7) 
+# Then p=0  and q=2, you should analyze the 7 first lag of ACF and PACF to find p and q. Here, you can see that there is no pic at any lag. 
+
+#ARIMA(0,0,2)(0,1,1)7
+
+########
+#c(2, 0, 3),  list(order = c(0, 1, 3) = tr= 13, test 15
+#c(2, 0, 2), list(order = c(0, 1, 3): 13, 15
+#(0, 0, 2), list(order = c(0, 1, 3) : 13.63, 15.24
+# c(0, 0, 3), list(order = c(0, 1, 3)13.6039, 15.23
+# c(0, 0, 4), list(order = c(0, 1, 3) 13.59, 15.23
+# c(0, 0, 4), list(order = c(0, 1, 1) 13.59, 15.41438
+#  c(1, 0, 4), list(order = c(0, 1, 3) 13.28 15.004
+# ts_train + 1 c(1, 0, 4), list(order = c(0, 1, 3), 13,25 15.27,
+# 13.51, 15.18
+#  c(1, 0, 3), list(order = c(0, 1, 3) 13.26176,  15.2491
+
+```
+
+
+#### **1.ARIMA-Model deduce from the ACF/PACF plots**
+
+```{r}
+ts_train_adjusted <- ts_train + 0.01
+# Fit the ARIMA model on the training set
+arima_model_1 <- Arima(
+  ts_train_adjusted,
+  c(1, 0, 4), list(order = c(0, 1, 3), period = 7),
+  include.constant = FALSE,
+  lambda =  "auto" # log transform
+)
+
+
+
+summary(arima_model_1)
+
+
+
+```
+
+
+```{r}
+# Generate forecasts using the ARIMA model
+arima_forecast_1 <- forecast(arima_model_1, h = length(ts_test))
+arima_forecast_df_1 = as.data.frame(arima_forecast_1)
+forecast_test_df_1  <- cbind(ts_test_df,arima_forecast_df_1)
+
+# Print evaluation metrics
+arima_evaluation <- accuracy(arima_forecast_1, ts_test)
+print(arima_evaluation)
+
+
+
+```
+
+
+
+
+
+```{r}
+residuals_mod_1 <- arima_model_1$residuals 
+
+# Create the ACF and PACF plots
+acf_plot <- ggAcf(residuals_mod_1) + theme_minimal() + ggtitle("Autocorrelation")
+pacf_plot <- ggPacf(residuals_mod_1) + theme_minimal() + ggtitle("Partial Autocorrelation")
+
+acf_plot/pacf_plot
+
+```
+
+Plots above shows the associated residuals for the first model and ARIMA forecast of the time series on the test set. It shows that there is not much significant autocorrelation at specific lags. However, to further assure the presence of autocorrelation in the residuals, Ljung-Box test is performed. The result of the Ljung-Box test provided are:
+
+```{r}
+Box.test( residuals_mod_1, lag = 36, type = "Ljung-Box")
+# This suggests that there is no significant autocorrelation in the residuals of your ARIMA model at the tested lags.
+# The residuals appear to behave like white noise, which is a desirable property, indicating that the ARIMA model has likely captured the underlying structure of the time series data well.
+
+```
+
+The results suggests that there is no evidence to reject the null hypothesis, meaning that there is no significant autocorrelation in the residuals of the first ARIMA model. This indicates that the first ARIMA model has likely captured the underlying structure of the time series data.
+
+
+```{r}
+
+
+fig <- plot_ly(forecast_test_df_1 , x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing Data',  line = list(color = 'steelblue'))
+fig <- fig %>% add_trace(y = ~`Point Forecast`,  name = 'ARIMA Forecast', line = list(color = 'orangered'))
+fig
+
+```
+
+
+
+#### **2.ARIMA-Auto ARIMA Model**
+
+```{r}
+# Fit the ARIMA model on the training set
+arima_model_auto <- auto.arima(ts_train_adjusted)
+summary(arima_model_auto)
+
+```
+
+```{r}
+w <- arima_model_auto$residuals
+Box.test( w, lag = 36, type = "Ljung-Box")
+
+```
+
+Since the p-value is extremely small, you reject the null hypothesis. This means that the residuals from the ARIMA model exhibit significant autocorrelation, indicating that the model may not have fully captured the underlying structure of the data.
+
+
+```{r}
+# Generate forecasts using the ARIMA model
+arima_forecast <- forecast(arima_model_auto, h = length(ts_test))
+arima_forecast_df = as.data.frame(arima_forecast)
+forecast_test_df  <- cbind(ts_test_df,arima_forecast_df)
+
+# Print evaluation metrics
+arima_evaluation <- accuracy(arima_forecast, ts_test)
+print(arima_evaluation)
+
+```
+
+
+
+
+#### **3. ARIMA with regressors sinusoidals**
+
+```{r}
+
+ts_data_adjusted <- ts_data+0.01
+
+s <- 365.25
+harm <- 1:20
+freq <- outer(1:length(ts_data_adjusted), harm)*2*pi/s
+co <- cos(freq)
+si <- sin(freq)
+colnames(co) <- paste0("cos", harm)
+colnames(si) <- paste0("sin", harm)
+X <- cbind(co, si)
+
+train_y <- ts_data_adjusted[1:1916]
+train_X <- X[1:1916, ]
+test_y <- ts_data_adjusted[1917:2282]
+test_X <- X[1917:2281,]
+
+mod1 <- Arima(train_y,
+              c(0, 0, 4),
+              list(order = c(0, 1, 1), period = 7),
+              train_X,
+              include.constant = FALSE,
+              lambda = "auto",
+              method = "CSS"
+)
+
+summary(mod1)
+
+
+
+```
+
+
+
+
+```{r}
+d <- mod1$residuals
+Box.test( d, lag = 36, type = "Ljung-Box")
+
+```
+
+Since the p-value is extremely small, you reject the null hypothesis. This means that the residuals from the ARIMA model exhibit significant autocorrelation, indicating that the model may not have fully captured the underlying structure of the data.
+
+```{r}
+arima_forecast <- forecast(mod1,  h = length(test_y) ,xreg = test_X)
+arima_forecast_df = as.data.frame(arima_forecast)
+forecast_test_df  <- cbind(ts_test_df,arima_forecast_df)
+
+
+fig <- plot_ly(forecast_test_df, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing',  line = list(color = 'steelblue'))
+fig <- fig %>% add_trace(y = ~`Point Forecast`,  name = 'ARIMA Forecast', line = list(color = 'darkred'))
+fig
+
+# Print evaluation metrics
+arima_evaluation <- accuracy(arima_forecast, ts_test)
+print(arima_evaluation)
+
+
+```
+
+
+
+
+#### **4. ARIMA with Italian holidays as external regressors.**
+
+
+```{r}
+
+##Modeling Holidays
+# Function to generate Italian holidays for a given year
+italian_holidays <- function(year) {
+  holidays <- c(
+    as.Date(paste(year, "01-01", sep = "-")), # New Year's Day
+    as.Date(paste(year, "01-06", sep = "-")), # Epiphany
+    as.Date(EasterSunday(year)),              # Easter Sunday
+    as.Date(EasterSunday(year) + days(1)),    # Easter Monday
+    as.Date(paste(year, "04-25", sep = "-")), # Liberation Day
+    as.Date(paste(year, "05-01", sep = "-")), # Labour Day
+    as.Date(paste(year, "06-02", sep = "-")), # Republic Day
+    as.Date(paste(year, "08-15", sep = "-")), # Assumption of Mary
+    as.Date(paste(year, "11-01", sep = "-")), # All Saints' Day
+    as.Date(paste(year, "12-08", sep = "-")), # Immaculate Conception
+    as.Date(paste(year, "12-25", sep = "-")), # Christmas Day
+    as.Date(paste(year, "12-26", sep = "-"))  # St. Stephen's Day
+  )
+  return(holidays)
+}
+
+# Generate a list of Italian holidays from 2009 to 2014
+years <- 2009:2015
+all_holidays <- do.call(c, lapply(years, italian_holidays))
+
+# Convert to Date format
+all_holidays <- as.Date(all_holidays)
+
+# Define start and end dates
+start_date <- as.Date("2009-01-01")
+end_date <- as.Date("2015-03-31")
+
+# Filter holidays to include only those within the specified date range
+fil_holidays <- all_holidays[all_holidays >= start_date & all_holidays <= end_date]
+
+# Convert the filtered holidays to a dataframe
+fil_holidays_df <- data.frame(Date = fil_holidays)
+
+It_holidays <- fil_holidays_df %>% mutate(holidays = 1) 
+
+ 
+# Convert the xts time series objects to a dataframe
+xts_data_df_ <- fortify(xts_data)
+# Dataframes (train-test)
+xts_data_df <- xts_data_df_ %>% rename (Date = "Index", Value ="xts_data" )
+ 
+Italy_holidays_ <- merge(x = xts_data_df, y = It_holidays, by = "Date", all.x = TRUE, all.y = TRUE)
+Italy_holidays <- Italy_holidays_ %>% select("Date","holidays")
+#na_counts <- colSums(is.na(Italy_holidays))
+Italy_holidays[is.na(Italy_holidays)] <- 0
+
+
+```
+
+
+
+
+```{r}
+
+Italy_holidays <- Italy_holidays[1:2281,]
+XX <- cbind(X, as.matrix(Italy_holidays[, 2])) # X = SINE COSINE 
+train_XX <- XX[1:1916, ] #train_X <- X[1:1916, ]
+test_XX <- XX[1917:2281, ]
+
+mod2 <- Arima(train_y,
+              c(0, 0, 4),
+              list(order = c(0, 1, 1), period = 7),
+              train_XX,
+              include.constant = FALSE,
+              lambda = 0,
+              method = "CSS"
+)
+summary(mod2)
+
+```
+
+
+
+
+```{r}
+f <- mod2$residuals
+Box.test( f, lag = 36, type = "Ljung-Box")
+
+```
+
+Since the p-value is extremely small, you reject the null hypothesis. This means that the residuals from the ARIMA model exhibit significant autocorrelation, indicating that the model may not have fully captured the underlying structure of the data.
+
+
+```{r}
+arima_forecast <- forecast(mod2,  h = length(test_y) ,xreg = test_XX)
+arima_forecast_df = as.data.frame(arima_forecast)
+forecast_test_df  <- cbind(ts_test_df,arima_forecast_df)
+
+
+#fig <- plot_ly(forecast_test_df, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing',  line = list(color = 'steelblue'))
+#fig <- fig %>% add_trace(y = ~`Point Forecast`,  name = 'Forecast', line = list(color = 'darkred'))
+#fig
+
+# Print evaluation metrics
+arima_evaluation <- accuracy(arima_forecast, ts_test)
+print(arima_evaluation)
+
+
+```
+
+
+
+
+```{r}
+
+## ARIMA FORECAST 2015-04-01 to 2015-11-07
+
+# Convert the filtered dataset into a zoo object (time series)
+#ts_data <- zoo(data_filtered$AVG_DAYS, order.by = data_filtered$date)
+
+# Convert zoo object to xts object
+#xts_data <- as.xts(ts_data)
+
+dati_f<- bind_rows(ts_train_df, ts_test_df)
+dati_f <- dati_f %>% select(Date, Value)
+
+# Convert the filtered dataset into a zoo object (time series)
+full_data_f <- zoo(dati_f$Value, order.by = dati_f$Date)
+# Convert zoo object to xts object
+xts_full_data <- as.xts(full_data_f)
+
+xts_full_data_adjusted <- xts_full_data + 0.01
+# Fit the ARIMA model on the training set
+arima_model_fore_n <- Arima(
+  xts_full_data_adjusted,
+  c(1, 0, 4), list(order = c(0, 1, 3), period = 7),
+  include.constant = FALSE,
+  lambda =  "auto" # log transform
+)
+
+
+## ARIMA forecast from 2015-04-01 to 2015-11-07
+start_date <- as.Date("2015-04-01")
+end_date <- as.Date("2015-11-07")
+forecast_periods <- as.numeric(end_date - start_date) + 1  # Number of days to forecast
+forecasted_values <- forecast(arima_model_fore_n, h = forecast_periods)
+
+arima_new_forecast_df = as.data.frame(forecasted_values)
+arima_new_forecast_df <- arima_new_forecast_df%>% rename(Forecast = "Point Forecast")
+
+
+
+#summary(arima_model_fore_n)
+
+date_sequence <- seq(from = start_date, to = end_date, by = "day")
+
+date_df <- data.frame(Date = date_sequence)
+
+
+df_arima_forecast <- cbind(date_df,arima_new_forecast_df)
+df_arima_forecast <- df_arima_forecast %>% select(Date, Forecast) %>% rename(arima_forecast = "Forecast")
+#head(df_arima_forecast)
+
+
+
+```
+
+#### **Summarized MAE of different ARIMA Models**
+
+The table below, shows the comparison MAE of training and test set of different ARIMA models.
+
+```{r}
+dtt <- data.frame(
+  Model_Description = c("1.Model deduce from the ACF/PACF plots", "2. Auto ARIMA Model",
+                        "3.ARIMA with sinusoidal components as external regressors.", "4.ARIMA with Italian holidays as external regressors."),
+  Model = c("ARIMA(1,0,4)(0,1,3)7","ARIMA(5,1,1) with drift",
+            "ARIMA(1,0,4)(0,1,3)7","ARIMA(1,0,4)(0,1,3)7"),
+  Training_set_MAE = c(13.28, 16.18,20.18, 20.71),
+  Testing_set_MAE = c(15.40,22.47, 16.80, 17.04)
+)
+
+
+dtt %>%
+  kbl() %>%
+  kable_material(c("striped", "hover"))
+
+```
+
+As depicted in table above, out of all the models the model that deduce from the ACF/PACF plot shows the least values for MAE. 
+
+## **UCM (Unobservant Component Model)**
+
+The UCM (Unobservant Component Model) is a type of time series model that used to decompose a series into various components such as trend, seasonality and irregular and noise components. 
+
+```{r}
+ucm_train <- as.numeric(ts_train)
+ucm_test <- as.numeric(ts_test)
+
+```
+
+#### **Model 1 - Seasonal UCM with a weakly period (7 days).**
+
+The first UCM allows to capture only the seasonal pattern in training data. The log-variance of the training data is used to set the initial values for the state disturbance for seasonal component and for the trend component.
+
+```{r}
+# Model 1
+ucm_seasonal <- SSModel(ucm_train ~ SSMseasonal(period = 7, Q = NA), H = NA)
+var <- var(ucm_train)
+
+inits <- c( 
+  log_var_eta = var/10,
+  log_var_zeta = var/100
+#  log_var_esp = vary/10
+)
+
+
+fit_ <- fitSSM(ucm_seasonal, log(inits))
+
+o_pred_train<-predict(fit_$model, n.ahead = length(ucm_train)) 
+o_pred_test<-predict(fit_$model, n.ahead = length(ucm_test)) 
+
+# Calculate MAE
+mae <- function(actual, predicted) {
+  mean(abs(actual - predicted))
+}
+
+mae_train <- mae(ucm_train, o_pred_train)
+cat("Testing set MAE:",mae_train,"\n")
+
+mae_test <- mae(ucm_test, o_pred_test)
+cat("Test set MAE:",mae_test,"\n")
+
+```
+
+
+#### **Model 2 - State-Space model with local linear trend and weekly seasonality component.**
+
+The second UCM allows to capture both the underlying trend and the seasonal component in the time series data. The initial values for the model captures the log-variances of the training data of the state disturbance of level, slope and the seasonal component.
+
+
+```{r}
+# Model 2
+# Define the model with local linear trend and seasonal component
+model_Llinear_seasonal <- SSModel(ucm_train ~ SSMtrend(2, Q = list(NA, NA)) +
+                                    SSMseasonal(period = 7, sea.type = "dummy"),
+                 H = NA)
+
+
+var <- var(ucm_train)
+
+inits <- c( 
+  log_var_eta = var/10,
+  log_var_zeta = var/100,
+  log_var_esp = var/10
+)
+
+fit1 <- fitSSM(model_Llinear_seasonal, log(inits))
+
+q_pred_train<-predict(fit1$model, n.ahead = length(ucm_train)) 
+q_pred_test<-predict(fit1$model, n.ahead = length(ucm_test)) 
+
+# Calculate MAPE
+mape <- function(actual,pred){
+  mape <- mean(abs((actual - pred)/actual))*100
+  return (mape)
+}
+# Calculate MAE
+mae <- function(actual, predicted) {
+  mean(abs(actual - predicted))
+}
+
+mae_train <- mae(ucm_train, q_pred_train)
+cat("Testing set MAE:",mae_train,"\n")
+
+mae_test <- mae(ucm_test, q_pred_test)
+cat("Test set MAE:",mae_test,"\n")
+
+#q_pred_df <- as.data.frame(q_pred_test)
+#ts_test_df_123 <- cbind(ts_test_df,q_pred_df)
+
+#fig <- plot_ly(ts_test_df_123, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing',  line = list(color = 'steelblue'))
+#fig <- fig %>% add_trace(y = ~`fit`,  name = 'Forecast', line = list(color = 'darkred'))
+#fig
+
+
+```
+
+
+
+
+```{r}
+
+q_pred_test_df <- as.data.frame(q_pred_test)
+q__pred_test_df_n <- cbind(ts_test_df,q_pred_test_df)
+
+fig <- plot_ly(q__pred_test_df_n, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing Data',  line = list(color = 'steelblue'))
+fig <- fig %>% add_trace(y = ~fit,  name = 'UCM Forecast', line = list(color = 'maroon'))
+fig
+
+
+
+```
+
+
+
+
+#### **Model 3 - State-Space model that combines random walk trend, weakly seasonality and yearly seasonality.**
+
+The third UCM model combines a random walk trend (1st-order trend), weakly seasonality (modelled as dummy variables) and yearly seasonality (modelled with trigonometric function). A set of initial values are used along with an update function that is used during the optimization process.
+
+```{r}
+# Model 3
+model_RW <- SSModel(ucm_train ~ SSMtrend(1, NA) +
+                      SSMseasonal(7, NA, "dummy") +
+                      SSMseasonal(365, NA, "trig",
+                                  harmonics = 1:20),
+                H = NA)
+
+var <- var(ucm_train, na.rm = TRUE)
+model_RW$P1inf <- model_RW$P1inf * 0
+
+
+init <- numeric(4)
+init[1] <- log(var/5)
+init[2] <- log(var/10)
+init[3] <- log(var/100)
+init[4] <- log(var/100)
+
+
+update_func <- function(pars, model){
+    model$Q[1, 1, 1] <- exp(pars[1])
+    model$Q[2, 2, 1] <- exp(pars[2])
+    model$Q[3, 3, 1] <- exp(pars[3]) 
+    model$Q[3:42, 3:42, 1] <-  exp(pars[4])
+    model$H[1, 1, 1] <- exp(pars[4])
+    model
+}
+
+model_RW_fit <- fitSSM(model_RW, init, update_func)
+
+
+
+e_pred_train<-predict(model_RW_fit$model, n.ahead = length(ucm_train)) 
+e_pred_test<-predict(model_RW_fit$model, n.ahead = length(ucm_test)) 
+
+# convergence
+i = model_RW_fit$optim.out$convergence
+cat("Convergence:",i,"\n")
+
+mae_train <- mae(ucm_train, e_pred_train)
+cat("Testing set MAE:",mae_train,"\n")
+
+mae_test <- mae(ucm_test, e_pred_test)
+cat("Test set MAE:",mae_test,"\n")
+
+
+```
+
+
+#### **Model 4: State-Space model that combines second-order polynomial trend, weakly seasonality and yearly seasonality.**
+
+The fourth UCM model combines second-order polynomial trend, weakly seasonality and yearly seasonality. The initial values that set in this model is similar to the third model and an update function is used to adjust the variances during the optimization process.
+
+
+```{r}
+# Model 4
+model_trend <- SSModel(ucm_train ~ SSMtrend(2, list(NA,NA)) +
+                    SSMseasonal(7, NA, "dummy") + 
+                    SSMseasonal(365, NA, "trig", harmonics = 1:20),
+                    H = NA)
+
+var <- var(ucm_train, na.rm = TRUE)
+model_trend$P1inf <- model_trend$P1inf * 0
+
+
+init <- numeric(4)
+init[1] <- log(var/5)
+init[2] <- log(var/10)
+init[3] <- log(var/100)
+init[4] <- log(var/100)
+
+
+update_func <- function(pars, model){
+    model$Q[1, 1, 1] <- exp(pars[1])
+    model$Q[2, 2, 1] <- exp(pars[2])
+    model$Q[3, 3, 1] <- exp(pars[3]) 
+    model$Q[4:43, 4:43, 1] <-  exp(pars[4])
+    model$H[1, 1, 1] <- exp(pars[4])
+    model
+}
+
+model_trend_fit <- fitSSM(model_trend, init, update_func)
+
+
+z_pred_train<-predict(model_trend_fit$model, n.ahead = length(ucm_train)) 
+z_pred_test<-predict(model_trend_fit$model, n.ahead = length(ucm_test)) 
+
+# convergence
+i = model_trend_fit$optim.out$convergence
+cat("Convergence:",i,"\n")
+
+mae_train <- mae(ucm_train, z_pred_train)
+cat("Testing set MAE:",mae_train,"\n")
+
+mae_test <- mae(ucm_test, z_pred_test)
+cat("Test set MAE:",mae_test,"\n")
+
+```
+
+
+
+```{r}
+## UCM Forecast
+ucm_xts_full_data <- as.numeric(xts_full_data)
+
+second_mod_fore <- SSModel(ucm_xts_full_data ~ SSMtrend(2, Q = list(NA, NA)) +
+                                    SSMseasonal(period = 7, sea.type = "dummy"),
+                 H = NA)
+
+
+var <- var(ucm_xts_full_data)
+
+inits <- c( 
+  log_var_eta = var/10,
+  log_var_zeta = var/100,
+  log_var_esp = var/10
+)
+
+fit_second_mod <- fitSSM(second_mod_fore, log(inits))
+
+pred_second_mod <-predict(fit_second_mod$model, n.ahead =  forecast_periods) 
+
+pred_second_mod_UCM <- as.data.frame(pred_second_mod)
+forecast_UCM <- pred_second_mod_UCM %>% rename(UCM_forecast = "fit")
+
+UCM_ARIMA <- cbind(df_arima_forecast, forecast_UCM)
+#UCM_ARIMA
+
+```
+
+
+#### **Summarized MAE values for different UCM Models**
+
+```{r}
+dtt <- data.frame(
+  Model_Description = c("1.Seasonal UCM with a weakly period (7 days).",
+"2.State-Space model with local linear trend and weekly seasonality component.",
+"3.State-Space model that combines random walk trend, weakly seasonality and yearly seasonality. ", "4. State-Space model that combines second-order polynomial trend, weakly seasonality and yearly seasonality."),
+  Training_set_MAE = c(24.78, 26.61, 26.58, 26.58),
+  Testing_set_MAE = c(16.10,15.48,17.07,17.07)
+)
+
+
+dtt %>%
+  kbl() %>%
+  kable_material(c("striped", "hover"))
+
+```
+
+
+Out of all the UCM models summarized in the table above, the second model is relatively best performed model for the testing data. Therefore, this model is selected to forecast for all days from 2015-04-01 to 2015-11-07. 
+
+## **Machine Learning Models**
+
+There are several machine learning algorithms and methods exists in analysing and forecasting time series data. Among them these machine learning models are implemented in this project: Random Forest, k-NN(K-Nearest Neighbours) and eXtreme Gradient Boost (XGBoost) algorithm.
+
+#### **Random Forest**
+
+The first Random Forecast model  is built by adding 13 lagged features to the training dataset and the model consists with 100 decision trees. 
+
+```{r}
+set.seed(100)
+#head(xts_data_df)
+xts_data_df <- combined_df_new %>% select(-Dataset)
+ts_full_xts <- xts(xts_data_df$Value, order.by = xts_data_df$Date)
+
+# lag values
+df_with_lags <- xts_data_df %>%
+  mutate(across(Value, list(
+    lag_1 = ~lag(., 1),
+    lag_2 = ~lag(., 2),
+    lag_3 = ~lag(., 3),
+    lag_4 = ~lag(., 4),
+    lag_5 = ~lag(., 5),
+    lag_6 = ~lag(., 6),
+    lag_7 = ~lag(., 7),
+    lag_8 = ~lag(., 8),
+    lag_9 = ~lag(., 9),
+    lag_10 = ~lag(., 10),
+    lag_11 = ~lag(., 11),
+    lag_12 = ~lag(., 12),
+    lag_13 = ~lag(., 13)
+  )))
+
+# Remove rows with NAs created by lagging
+full_df_with_lags <- df_with_lags[complete.cases(df_with_lags), ]
+
+# train/test split
+train_RF_df <- subset(full_df_with_lags, Date >= as.Date("2009-01-01") & Date <= as.Date("2014-03-31"))
+test_RF_df <- subset(full_df_with_lags, Date >= as.Date("2014-04-01") & Date <= as.Date("2015-03-31"))
+
+# Fit a Random Forest model
+rf_model <- randomForest(Value ~ ., data = train_RF_df, ntree = 100)
+ 
+# Make predictions on the test data
+predictions <- predict(rf_model, newdata = test_RF_df)
+  
+# Calculate MAPE
+mape <- function(actual,pred){
+  mape <- mean(abs((actual - pred)/actual))*100
+}
+# Calculate MAE
+mae <- function(actual, predicted) {
+  mean(abs(actual - predicted))
+}
+
+# Evaluate the model using RMSE
+rmse <- function(actual, pred){
+  sqrt(mean((actual- pred)^2))
+}
+  
+
+mape <- mape(test_RF_df$Value, predictions)
+cat("MAPE:", mape, "\n")
+
+# mae_train <- mae(ucm_train, q_pred_train)
+mae <- mae(test_RF_df$Value, predictions)
+cat("MAE:", mae, "\n")
+
+# Evaluate the model using RMSE
+rmse <- rmse(test_RF_df$Value, predictions)
+cat("RMSE:", rmse, "\n")
+
+
+rf_pred_1 <- as.data.frame(predictions)
+rf_pred_1_df <- cbind(ts_test_df,rf_pred_1)
+
+fig <- plot_ly(rf_pred_1_df, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing Data',  line = list(color = 'steelblue'))
+fig <- fig %>% add_trace(y = ~predictions,  name = 'RF Forecast', line = list(color = 'brown'))
+fig
+
+
+
+```
+
+
+#### **RF model with Cross Validation**
+
+The second Random Forest model is constructed similar to the 1st model with 13 lagged features and 100 decision trees along with 10-fold cross-validation for training Random Forest model. 
+
+```{r}
+# cross-validation method
+train_control <- trainControl(method = "cv", number = 10)  # 10-fold cross-validation
+#  model 
+rf_model_cv <- train(Value ~ ., 
+                     data = train_RF_df, 
+                     method = "rf", 
+                     ntree = 100, 
+                     trControl = train_control)
+
+predictions_rf_cv <- predict(rf_model_cv, newdata = test_RF_df)
+
+
+# Calculate MAPE
+mape <- function(actual,pred){
+ mean(abs((actual - pred)/actual))*100
+}
+
+# Calculate MAE
+mae <- function(actual, predicted) {
+  mean(abs(actual - predicted))
+}
+
+# Evaluate the model using RMSE
+rmse <- function(actual, pred){
+  sqrt(mean((actual- pred)^2))
+}
+  
+
+mape <- mape(test_RF_df$Value, predictions_rf_cv)
+cat("MAPE:", mape, "\n")
+
+
+mae <- mae(test_RF_df$Value, predictions_rf_cv)
+cat("MAE:", mae, "\n")
+
+
+rmse <- rmse(test_RF_df$Value, predictions_rf_cv)
+cat("RMSE:", rmse, "\n")
+
+
+rf_pred_2 <- as.data.frame(predictions_rf_cv)
+rf_pred_2_df <- cbind(ts_test_df,rf_pred_2)
+
+fig <- plot_ly(rf_pred_2_df, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing Data',  line = list(color = 'steelblue'))
+fig <- fig %>% add_trace(y = ~predictions,  name = 'RF CV Forecast', line = list(color = 'brown'))
+fig
+
+
+```
+
+
+
+
+#### **k-NN (k- nearest neighbours)**
+
+The 3rd model consist with 13 lags that used as autoregressive variables in training k-NN model and uses a recursive strategy with 3 nearest neighbours.
+
+```{r}
+# ,start = c(2009,01,01), end = c(2015,03,31),
+ts_ <- ts(combined_df_new$Value,  frequency = 365)
+knn_train <- ts_[1:1916]
+knn_test <- ts_[1917:2281]
+
+
+# The recursive strategy
+mod <- knn_forecasting(knn_train, h = 365, lags = 1:13, k=3, msas = "recursive")
+pre <- mod$prediction
+
+pre_knn = as.data.frame(pre)
+pre_knn <- pre_knn %>% rename(knn_pred = "x")
+knn_pred_df <- cbind(ts_test_df,pre_knn)
+
+# Calculate MAPE
+mape <- function(actual,pred){
+ mean(abs((actual - pred)/actual))*100
+}
+
+# Calculate MAE
+mae <- function(actual, predicted) {
+  mean(abs(actual - predicted))
+}
+
+# Evaluate the model using RMSE
+rmse <- function(actual, pred){
+  sqrt(mean((actual- pred)^2))
+}
+
+mae_test <- mae(knn_pred_df$Value,knn_pred_df$knn_pred)  
+mape_test <- mape(knn_pred_df$Value,knn_pred_df$knn_pred)
+rmse_test <- rmse(knn_pred_df$Value,knn_pred_df$knn_pred)
+
+cat("MAE:", mae_test, "\n")
+cat("MAPE:", mape_test, "\n")
+cat("RMSE:", rmse_test, "\n")
+
+
+fig <- plot_ly(knn_pred_df, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing Data',  line = list(color = 'steelblue'))
+fig <- fig %>% add_trace(y = ~knn_pred,  name = 'k-NN Forecast', line = list(color = 'salmon'))
+fig
+
+  
+
+```
+
+#### **Additive k-NN model**
+
+The 4th model is also encompassed with recursive strategy along with the transformed training samples using additive method and used different k parameters.
+
+```{r}
+
+# msas = "exact": This option uses the exact strategy, which is non-recursive and produces forecasts directly without using previous predictions as inputs for subsequent predictions.
+mod_mi <- knn_forecasting(knn_train, h = 365, lags = 1:13, k=c(2,3), msas = "recursive",transform = "additive" )
+
+pre_m <- mod_mi$prediction
+pre_knn_m = as.data.frame(pre_m)
+pre_knn_m <- pre_knn_m %>% rename(knn_pred = "x")
+#pre_knn
+
+knn_pred_m_df <- cbind(ts_test_df,pre_knn_m)
+#knn_pred_df
+
+mae_test <- mae(knn_pred_m_df$Value, knn_pred_m_df$knn_pred)  
+mape_test <- mape(knn_pred_m_df$Value, knn_pred_m_df$knn_pred)
+rmse_test <- rmse(knn_pred_m_df$Value, knn_pred_m_df$knn_pred)
+
+cat("MAE:", mae_test, "\n")
+cat("MAPE:", mape_test, "\n")
+cat("RMSE:", rmse_test, "\n")
+
+
+
+fig <- plot_ly(knn_pred_m_df, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing Data',  line = list(color = 'steelblue'))
+fig <- fig %>% add_trace(y = ~knn_pred,  name = 'Additive k-NN Forecast', line = list(color = 'salmon'))
+fig
+
+  
+
+
+```
+
+
+#### **xgboost**
+
+The 5th model is also composed with 13 lagged features and  trained with 100 boosting iterations.
+
+```{r}
+
+df_with_lags <- xts_data_df %>%
+  mutate(across(Value, list(
+    lag_1 = ~lag(., 1),
+    lag_2 = ~lag(., 2),
+    lag_3 = ~lag(., 3),
+    lag_4 = ~lag(., 4),
+    lag_5 = ~lag(., 5),
+    lag_6 = ~lag(., 6),
+    lag_7 = ~lag(., 7),
+    lag_8 = ~lag(., 8),
+    lag_9 = ~lag(., 9),
+    lag_10 = ~lag(., 10),
+    lag_11 = ~lag(., 11),
+    lag_12 = ~lag(., 12),
+    lag_13 = ~lag(., 13)
+  )))
+
+full_df_with_lags_xg <- df_with_lags[complete.cases(df_with_lags), ]
+
+# train/test split
+train_xg_df <- subset(full_df_with_lags, Date >= as.Date("2009-01-01") & Date <= as.Date("2014-03-31"))
+test_xg_df <- subset(full_df_with_lags, Date >= as.Date("2014-04-01") & Date <= as.Date("2015-03-31"))
+# Convert to matrix format
+train_matrix <- xgb.DMatrix(data = as.matrix(train_xg_df[,                                                           c("Value_lag_1","Value_lag_2","Value_lag_3","Value_lag_4","Value_lag_5",                             "Value_lag_6","Value_lag_7","Value_lag_8","Value_lag_9","Value_lag_10",
+                    "Value_lag_11","Value_lag_12","Value_lag_13")]),
+                            label = train_xg_df$Value)
+test_matrix <- xgb.DMatrix(data = as.matrix(test_xg_df[, c("Value_lag_1","Value_lag_2","Value_lag_3","Value_lag_4","Value_lag_5",                             "Value_lag_6","Value_lag_7","Value_lag_8","Value_lag_9","Value_lag_10",
+                    "Value_lag_11","Value_lag_12","Value_lag_13")]),
+                           label = test_xg_df$Value)
+
+# Define XGBoost parameters
+params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "rmse",
+  eta = 0.1,
+  max_depth = 3
+)
+
+# Train the model
+model_xg <- xgb.train(params = params,
+                    data = train_matrix,
+                    nrounds = 100)
+
+# Make predictions
+predict_xg <- predict(model_xg, test_matrix)
+predict_xg_df <- as.data.frame(predict_xg)
+predict_xg_df <- predict_xg_df %>% rename(xg_pred = "predict_xg")
+predict_xg_test_df <- cbind(test_xg_df,predict_xg_df)
+#predict_xg_test_df
+
+#mae_value <- mae(test_xg_df$Value, predict_xg)
+#print(paste("MAE:", mae_value))
+
+########################
+
+# Calculate MAPE
+mape <- function(actual,pred){
+ mean(abs((actual - pred)/actual))*100
+}
+
+# Calculate MAE
+mae <- function(actual, predicted) {
+  mean(abs(actual - predicted))
+}
+
+# Evaluate the model using RMSE
+rmse <- function(actual, pred){
+  sqrt(mean((actual- pred)^2))
+}
+
+mae_test <- mae(test_xg_df$Value, predict_xg)  
+mape_test <- mape(test_xg_df$Value, predict_xg)
+rmse_test <- rmse(test_xg_df$Value, predict_xg)
+
+cat("MAE:", mae_test, "\n")
+cat("MAPE:", mape_test, "\n")
+cat("RMSE:", rmse_test, "\n")
+
+
+fig <- plot_ly(predict_xg_test_df, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing Data',  line = list(color = 'steelblue'))
+fig <- fig %>% add_trace(y = ~xg_pred,  name = 'XGBoost Forecast', line = list(color = 'chocolate'))
+fig
+
+  
+
+```
+
+
+
+#### **xgboost - cross validation**
+
+The 6th model is also using same number of boosting iterations along with 10-fold cross-validation. 
+
+```{r}
+# xgbost
+# Perform cross-validation
+cv_model <- xgb.cv(params = params,
+                   data = train_matrix,
+                   nrounds = 100,
+                   nfold = 10,               # Number of cross-validation folds
+                   verbose = FALSE,          
+                   early_stopping_rounds = 10, 
+                   maximize = FALSE)        
+
+# Extract the best number of rounds
+best_nrounds <- cv_model$best_iteration
+
+# Train the final model using the best number of rounds
+final_model_cv <- xgb.train(params = params,
+                         data = train_matrix,
+                         nrounds = best_nrounds)
+# Make predictions
+predictions_xg_cv <- predict(final_model_cv, test_matrix)
+predictions_xg_cv_df <- as.data.frame(predictions_xg_cv)
+predictions_xg_cv_df <- predictions_xg_cv_df %>% rename(pred_xg_cv = "predictions_xg_cv")
+test_xg_cv_df <- cbind(test_xg_df, predictions_xg_cv_df)
+# Calculate Mean Absolute Error (MAE)
+#mae_value <- mae(test_xg_df$Value, predictions)
+#print(paste("MAE:", mae_value))
+
+# Calculate MAPE
+mape <- function(actual,pred){
+ mean(abs((actual - pred)/actual))*100
+}
+
+# Calculate MAE
+mae <- function(actual, predicted) {
+  mean(abs(actual - predicted))
+}
+
+# Evaluate the model using RMSE
+rmse <- function(actual, pred){
+  sqrt(mean((actual- pred)^2))
+}
+
+mae_test <- mae(test_xg_df$Value, predictions_xg_cv)  
+mape_test <- mape(test_xg_df$Value, predictions_xg_cv)
+rmse_test <- rmse(test_xg_df$Value, predictions_xg_cv)
+
+cat("MAE:", mae_test, "\n")
+cat("MAPE:", mape_test, "\n")
+cat("RMSE:", rmse_test, "\n")
+
+
+fig <- plot_ly(test_xg_cv_df, x = ~Date, y = ~Value, type = 'scatter', mode = 'lines', name = 'Testing Data',  line = list(color = 'steelblue'))
+fig <- fig %>% add_trace(y = ~pred_xg_cv,  name = 'XGBoost CV Forecast', line = list(color = 'chocolate'))
+fig
+
+
+```
+
+
+#### **Summarized MAE, MAPE and RMSE of different Machine Learning Models.**
+
+
+```{r}
+dtt <- data.frame(
+  Model_Description = c("1.Random Forest model with the lag values.",
+                        "2.Random Forest model with the lag values implemented using cross-validation method.",
+                        "3.Recursive KNN model with lag values.",
+                        "4.Recursive KNN model with lag values and transformed training samples.",
+                        "5.XGBoost model with the lag values.",
+                        "6.XGBoost model with the lag values implemented using cross-validation method."),
+  Training_set_MAE = c(15.19, 15.54, 20.35, 24.50,14.67,14.66),
+  Testing_set_MAPE = c(333.442, 332.346, 602.617, 720.306, 328.902, 335.733),
+  Testing_set_RMSE = c(22.27, 20.44, 25.57, 29.66, 20.00, 19.68)
+)
+
+
+dtt %>%
+  kbl() %>%
+  kable_material(c("striped", "hover"))
+
+```
+
+
+
+
+
+```{r}
+# XGBOOST FORECAST
+#forecast_dates <- seq.Date(from = as.Date("2015-04-01"), to = as.Date("2015-11-07"), by = "day")
+#forecast_df <- data.frame(Date = forecast_dates, Value = NA)
+
+# lagged values
+#last_known_values <- as.numeric(test_xg_df[nrow(test_xg_df), c("Value_lag_1","Value_lag_2","Value_lag_3","Value_lag_4","Value_lag_5",                            #                            #"Value_lag_6","Value_lag_7","Value_lag_8","Value_lag_9","Value_lag_10"                            #                                "Value_lag_11","Value_lag_12","Value_lag_13")])
+
+# Predict for each day sequentially
+#for (i in 1:nrow(forecast_df)) {
+#  new_row <- as.numeric(last_known_values)
+#  new_matrix <- xgb.DMatrix(data = t(new_row))
+#  predicted_value <- predict(final_model_cv, new_matrix)
+#  forecast_df$Value[i] <- predicted_value
+#  last_known_values <- c(predicted_value, last_known_values[1:(length(last_known_values) - 1)])
+#}
+
+
+
+```
+
+
+**xgboost model without including lag values**
+
+```{r}
+# Train/test split (without lag features)
+train_xg_df <- subset(xts_data_df, Date >= as.Date("2009-01-01") & Date <= as.Date("2014-03-31"))
+test_xg_df <- subset(xts_data_df, Date >= as.Date("2014-04-01") & Date <= as.Date("2015-03-31"))
+
+# Convert to matrix format (using only the original Value, no lags)
+train_matrix <- xgb.DMatrix(data = as.matrix(train_xg_df[,"Value"]),
+                            label = train_xg_df$Value)
+test_matrix <- xgb.DMatrix(data = as.matrix(test_xg_df[,"Value"]),
+                           label = test_xg_df$Value)
+
+# Define XGBoost parameters
+params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "rmse",
+  eta = 0.1,
+  max_depth = 3
+)
+
+# Train the model
+model_xg_11 <- xgb.train(params = params,
+                    data = train_matrix,
+                    nrounds = 100)
+
+# Make predictions
+predict_xg_11 <- predict(model_xg_11, test_matrix)
+predict_xg_df <- as.data.frame(predict_xg_11)
+predict_xg_df <- predict_xg_df %>% rename(xg_pred = "predict_xg_11")
+predict_xg_test_df <- cbind(test_xg_df, predict_xg_df)
+
+# Calculate MAE, MAPE, RMSE
+mae <- function(actual, predicted) {
+  mean(abs(actual - predicted))
+}
+
+mape <- function(actual, pred) {
+  mean(abs((actual - pred) / actual)) * 100
+}
+
+rmse <- function(actual, pred) {
+  sqrt(mean((actual - pred)^2))
+}
+
+mae_test <- mae(test_xg_df$Value, predict_xg)
+mape_test <- mape(test_xg_df$Value, predict_xg)
+rmse_test <- rmse(test_xg_df$Value, predict_xg)
+
+cat("MAE:", mae_test, "\n")
+cat("MAPE:", mape_test, "\n")
+cat("RMSE:", rmse_test, "\n")
+
+```
+
+
+
+```{r}
+# Dates
+forecast_dates <- seq.Date(from = as.Date("2015-04-01"), to = as.Date("2015-11-07"), by = "day")
+forecast_df <- data.frame(Date = forecast_dates, Value = NA)
+
+
+test_data <- data.frame(Value = test_xg_df$Value)
+
+
+test_matrix <- xgb.DMatrix(data = as.matrix(test_data))
+
+# Predict 
+predicted_values <- predict(model_xg_11, test_matrix)
+
+
+forecast_df$Value <- predicted_values[1:nrow(forecast_df)]
+
+#forecast_df
+
+```
+
+#### **Forecast from 2015-04-01 to 2015-11-07**
+
+```{r}
+forecast_df <- forecast_df %>% rename(date = "Date")
+UCM_ARIMA_ML <- cbind(UCM_ARIMA,forecast_df)
+UCM_ARIMA_ML <-UCM_ARIMA_ML %>% select(-date)  %>% 
+   rename(date = "Date") %>%
+  rename(ARIMA = "arima_forecast")  %>% 
+  rename(UCM = "UCM_forecast") %>%
+  rename(ML = "Value")
+#head(UCM_ARIMA_ML)
+
+```
+
+
+```{r}
+```
+
+
+```{r}
+fig <- plot_ly(UCM_ARIMA_ML, x = ~date, y = ~ARIMA, type = 'scatter', mode = 'lines', name = 'ARIMA',  line = list(color = 'darkblue'))
+fig <- fig %>% add_trace(y = ~UCM,  name = 'UCM', line = list(color = 'red'))
+fig <- fig %>% add_trace(y = ~ML,  name = 'ML', line = list(color = 'green'))
+
+# Add xlab and ylab using layout
+fig <- fig %>% layout(
+  xaxis = list(title = "Date"),  # x-axis label
+  yaxis = list(title = "Value")  # y-axis label
+)
+fig
+
+```
+
+
+```{r}
+
+#write.csv(UCM_ARIMA_ML , "C:/Users/1999i/Documents/time_series/906451_20240915", row.names = FALSE)
+
+```
+
+
+
+
+
