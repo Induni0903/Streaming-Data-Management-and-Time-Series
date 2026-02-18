@@ -1,8 +1,6 @@
 # Streaming-Data-Management-and-Time-Series
 
-Time Series Analysis and ForecastingStatistical & Machine Learning Comparative Study
-
-The objective of this study is to evaluate how traditional state-space and auto-regressive models perform against non-linear machine learning models when forecasting daily temporal data.
+This project explores the application of both classical statistical methods and modern machine learning algorithms for Time Series Analysis and Forecasting. The primary goal is to predict daily values for a specific timeframe (2015-04-01 to 2015-11-07) by comparing the predictive accuracy of linear models against ensemble learning techniques.
 
 ## 1. Models & Methodologies
 
